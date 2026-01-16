@@ -3,15 +3,12 @@ from random import randint
 
 
 class Model:
-    def __init__(self, input_size, hidden_size1, hidden_size2, output_size):
-        self.input_size = input_size
-        self.hidden_size1 = hidden_size1
-        self.hidden_size2 = hidden_size2
-        self.output_size = output_size
+    def __init__(self, size):
+        self.size = size
+        self.w = list()
 
-        self.w1 = torch.randn(hidden_size1, input_size + 1) * 0.1
-        self.w2 = torch.randn(hidden_size2, hidden_size1 + 1, ) * 0.1
-        self.w3 = torch.randn(output_size, hidden_size2 + 1, ) * 0.1
+        for i in range(1, len(size)):
+            self.w.append(torch.randn(self.size[i], self.size[i-1] + 1) * 0.1)
 
     def act(self, z):
         return torch.tanh(z)
@@ -21,60 +18,67 @@ class Model:
         return 1 - s * s
 
     def forward(self, x):
-        x_bias = torch.cat([x, torch.tensor([1.0])])
+        value = list()
+        act = list()
+        act.append(x)
+        act_with_bias = list()
 
-        z1 = torch.mv(self.w1, x_bias)
-        s1 = self.act(z1)
-        s1_bias = torch.cat([s1, torch.tensor([1.0])])
+        for i in range(len(self.w)):
+            act_with_bias.append(torch.cat([act[i], torch.tensor([1.0])]))
+            value.append(torch.matmul(self.w[i], act_with_bias[i]))
+            act.append(self.act(value[i]))
 
-        z2 = torch.mv(self.w2, s1_bias)
-        s2 = self.act(z2)
-        s2_bias = torch.cat([s2, torch.tensor([1.0])])
+        return act, act_with_bias, value
 
-        z3 = torch.mv(self.w3, s2_bias)
-        y = self.act(z3)
+    def backward(self, target, act, act_with_bias, value):
+        delta = list()
+        delta.append((act[-1] - target) * self.df(value[-1]))
 
-        return y, z3, s2, z2, s1, z1
+        for i in range(len(self.w) - 1):
+            w_i = self.w[-1 - i]
+            w_i_without_bias = w_i[:, :-1]
 
-    def backward(self, target, y, z3, z2, z1):
-        e = y - target
-        delta3 = e * self.df(z3)
-        delta2 = torch.mv(self.w3[:, :-1].t(), delta3, ) * self.df(z2)
-        delta1 = torch.mv(self.w2[:, :-1].t(), delta2) * self.df(z1)
+            delta.append(torch.matmul(w_i_without_bias.t(), delta[-1]) * self.df(value[-2 - i]))
 
-        return delta1, delta2, delta3
+        return delta
 
     def fit(self, x_train, y_train, n, lmd):
-        for _ in range(n):
+        for epoch in range(n):
             k = randint(0, len(y_train) - 1)
 
-            y, z3, s2, z2, s1, z1 = self.forward(x_train[k])
+            act, act_with_bias, value = self.forward(x_train[k])
+            delta = self.backward(y_train[k], act, act_with_bias, value)
 
-            delta1, delta2, delta3 = self.backward(y_train[k], y, z3, z2, z1)
+            if epoch % 5000 == 0:
+                print(f"\nЭпоха {epoch}:")
+                print(f"  Вход: {x_train[k]}")
+                print(f"  Выход: {act[-1]}, Цель: {y_train[k]}")
+                print(f"  Ошибка: {(act[-1] - y_train[k])}")
+                print(f"  Количество дельт: {len(delta)}")
+                print(f"  Дельта[0] (выходной слой): {delta[0]}")
+                print(f"  Веса W[0][0,:3] до обновления: {self.w[0][0, :3]}")
 
-            s2_bias = torch.cat([s2, torch.tensor([1.0])])
-            s1_bias = torch.cat([s1, torch.tensor([1.0])])
-            x_bias = torch.cat([x_train[k], torch.tensor([1.0])])
-
-            self.w3 = self.w3 - lmd * torch.outer(delta3, s2_bias)
-            self.w2 = self.w2 - lmd * torch.outer(delta2, s1_bias)
-            self.w1 = self.w1 - lmd * torch.outer(delta1, x_bias)
+            for i in range(len(self.w)):
+                self.w[i] = self.w[i] - lmd * torch.outer(delta[-1 - i], act_with_bias[i])
 
 torch.manual_seed(1)
 
-a = Model(3, 8, 4, 1)
+size = (3, 8, 4, 2)
+a = Model(size)
 
 x_train = torch.FloatTensor([
     [-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
     [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1]
 ])
 
-y_train = torch.FloatTensor([-1, 1, 1, -1, -1, 1, 1, -1])
+y_train = torch.FloatTensor([[-1, 1], [1, -1], [1, -1], [-1, 1], [-1, 1], [1, -1], [1, -1], [-1, 1]])
 lmd = 0.1
 n = 20000
 
 a.fit(x_train, y_train, n, lmd)
 
 for x, d in zip(x_train, y_train):
-   y, z3, s2, z2, s1, z1 = a.forward(x)
+   act, act_with_bias, value = a.forward(x)
+   y = act[-1]
+
    print(f"Выходное значение НС: {y} => {d}")
