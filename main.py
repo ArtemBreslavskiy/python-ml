@@ -84,7 +84,7 @@ for _e in range(epochs):
 
         lm_count += 1
         loss_mean = 1 / lm_count * loss.item() + (1 - 1 / lm_count) * loss_mean
-        train_tdqm.set_description((f"Epoch [{_e + 1}/{epochs}], loss_mean={loss_mean:.3f}"))
+        train_tdqm.set_description(f"Epoch [{_e + 1}/{epochs}], loss_mean={loss_mean:.3f}")
 
 d_test = DigitDataset("dataset", train=False, transform=to_tensor)
 test_data = data.DataLoader(d_test, batch_size=500, shuffle=False)
