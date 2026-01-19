@@ -31,7 +31,8 @@ class DigitNN(nn.Module):
 
 
 model = DigitNN(28 * 28, 32, 10)
-st = model.state_dict()
+st = torch.load("model_dnn.tar", weights_only=True)
+model.load_state_dict(st)
 
 transforms = tfs.Compose([tfs.ToImage(), tfs.Grayscale(),
                          tfs.ToDtype(torch.float32, scale=True),
@@ -43,7 +44,7 @@ train_data = data.DataLoader(d_train, batch_size=32, shuffle=True)
 optimizer = optim.Adam(params=model.parameters(), lr=0.01)
 loss_function = nn.CrossEntropyLoss()
 
-epochs = 2
+epochs = 0
 model.train()
 
 for _e in range(epochs):
@@ -78,5 +79,3 @@ for x_test, y_test in test_data:
 
 Q /= len(d_test)
 print(Q)
-
-torch.save(st, 'model_dnn.tar')
