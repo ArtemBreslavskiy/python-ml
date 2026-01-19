@@ -31,6 +31,7 @@ class DigitNN(nn.Module):
 
 
 model = DigitNN(28 * 28, 32, 10)
+st = model.state_dict()
 
 transforms = tfs.Compose([tfs.ToImage(), tfs.Grayscale(),
                          tfs.ToDtype(torch.float32, scale=True),
@@ -77,3 +78,5 @@ for x_test, y_test in test_data:
 
 Q /= len(d_test)
 print(Q)
+
+torch.save(st, 'model_dnn.tar')
