@@ -23,17 +23,17 @@ class DigitNN(nn.Module):
         super().__init__()
         self.layer1 = nn.Linear(input_dim, hidden_dim)
         self.layer2 = nn.Linear(hidden_dim, output_dim)
-        self.dropout_1 = nn.Dropout(0.3)
+        self.bm_1 = nn.BatchNorm1d(hidden_dim)
 
     def forward(self, x):
         x = self.layer1(x)
         x = nn.functional.relu(x)
-        x = self.dropout_1(x)
+        x = self.bm_1(x)
         x = self.layer2(x)
         return x
 
 
-model = DigitNN(28 * 28, 128, 10)
+model = DigitNN(28 * 28, 32, 10)
 
 transforms = tfs.Compose([tfs.ToImage(), tfs.Grayscale(),
                          tfs.ToDtype(torch.float32, scale=True),
