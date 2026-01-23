@@ -1,98 +1,114 @@
-import os
-import json
 from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
 
 import torch
+from torchvision import models
+import torchvision.transforms.v2 as tfs_v2
 import torch.nn as nn
-import torch.utils.data as data
-import torchvision.transforms.v2 as tfs
 import torch.optim as optim
-from tqdm import tqdm
 
 
-class SunDataset(data.Dataset):
-    def __init__(self, path, train=True, transform=None):
-        self.path = os.path.join(path, "train" if train else "test")
-        self.transform = transform
+class ModelStyle(nn.Module):
+    def __init__(self):
+        super().__init__()
+        _model = models.vgg19(weights=models.VGG19_Weights.DEFAULT)
+        self.mf = _model.features
+        self.mf.requires_grad_(False)
+        self.requires_grad_(False)
+        self.mf.eval()
+        self.idx_out = (0, 5, 10, 19, 28, 34)
+        self.num_style_layers = len(self.idx_out) - 1
 
-        with open(os.path.join(self.path, "format.json"), "r") as fp:
-            self.format = json.load(fp)
+    def forward(self, x):
+        outputs = []
+        for indx, layer in enumerate(self.mf):
+            x = layer(x)
+            if indx in self.idx_out:
+                outputs.append(x.squeeze(0))
 
-            self.length = len(self.format)
-            self.files = tuple(self.format.keys())
-            self.targets = tuple(self.format.values())
-
-    def __getitem__(self, item):
-        path_file = os.path.join(self.path, self.files[item])
-        img = Image.open(path_file).convert('RGB')
-
-        if self.transform:
-            img = self.transform(img)
-
-            return img, torch.tensor(self.targets[item], dtype=torch.float32)
-
-    def __len__(self):
-        return self.length
+        return outputs
 
 
-transforms = tfs.Compose([tfs.ToImage(), tfs.ToDtype(torch.float32, scale=True)])
-d_train = SunDataset("dataset_reg", transform=transforms)
-train_data = data.DataLoader(d_train, batch_size=32, shuffle=True)
+def get_content_loss(base_content, target):
+    return torch.mean(torch.squeeze(base_content - target))
 
-model = nn.Sequential(
-    nn.Conv2d(3, 32, 3, padding='same'),
-    nn.ReLU(),
-    nn.MaxPool2d(2),
-    nn.Conv2d(32, 8, 3, padding='same'),
-    nn.ReLU(),
-    nn.MaxPool2d(2),
-    nn.Conv2d(8, 4, 3, padding='same'),
-    nn.ReLU(),
-    nn.MaxPool2d(2),
-    nn.Flatten(),
-    nn.Linear(4096, 128),
-    nn.Linear(128, 2)
-)
 
-optimizer = optim.Adam(params=model.parameters(), lr=0.001, weight_decay=0.001)
-loss_function = nn.MSELoss()
+def gram_matrix(x):
+    channels = x.size(dim=0)
+    g = x.view(channels, -1)
+    gram = torch.mm(g, g.mT) / g.size(dim=1)
+    return gram
 
-epochs = 5
-model.train()
+
+def get_style_loss(base_style, gram_target):
+    style_weights = [1.0, 0.8, 0.5, 0.3, 0.1]
+
+    _loss = 0
+    i = 0
+    for base, target in zip(base_style, gram_target):
+        gram_style = gram_matrix(base)
+        _loss += style_weights[i] * torch.mean(torch.square(gram_style - target))
+        i += 1
+
+    return _loss
+
+
+img = Image.open('img_3.jpg').convert('RGB')
+img_style = Image.open('img_style_2.jpg').convert('RGB')
+
+transforms = tfs_v2.Compose([tfs_v2.ToImage(),
+                             tfs_v2.ToDtype(torch.float32, scale=True)
+                             ])
+
+img = transforms(img).unsqueeze(0)
+img_style = transforms(img_style).unsqueeze(0)
+img_create = img.clone()
+img_create.requires_grad_(True)
+
+model = ModelStyle()
+
+outputs_img = model(img)
+outputs_img_style = model(img_style)
+
+gram_matrix_style = [gram_matrix(x) for x in outputs_img_style[:model.num_style_layers]]
+
+content_weight = 1
+style_weight = 1000
+best_loss = -1
+epochs = 100
+best_img = img_create.clone()
+
+optimizer = optim.Adam(params=[img_create], lr=0.01)
 
 for _e in range(epochs):
-    loss_mean = 0
-    lm_count = 0
+    outputs_img_create = model(img_create)
 
-    train_tqdm = tqdm(train_data, leave=True)
-    for x_train, y_train in train_tqdm:
-        predict = model(x_train)
-        loss = loss_function(predict, y_train)
+    loss_content = get_content_loss(outputs_img_create[-1], outputs_img[-1])
+    loss_style = get_style_loss(outputs_img_create, gram_matrix_style)
+    loss = content_weight * loss_content + style_weight * loss_style
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
 
-        lm_count += 1
-        loss_mean = 1/lm_count * loss.item() + (1 - 1/lm_count) * loss_mean
-        train_tqdm.set_description(f"Epoch [{_e+1}/{epochs}], loss_mean={loss_mean:.3f}")
+    img_create.data.clamp_(0, 1)
 
-st = model.state_dict()
-torch.save(st, 'model_sun.tar')
+    if loss < best_loss or best_loss < 0:
+        best_loss = loss
+        best_img = img_create.clone()
 
-d_test = SunDataset("dataset_reg", train=False, transform=transforms)
-test_data = data.DataLoader(d_test, batch_size=50, shuffle=False)
+    print(f'Iteration: {_e}/{epochs}, loss: {loss.item():.4f}')
 
-Q = 0
-count = 0
-model.eval()
+x = best_img.detach().squeeze()
+low, hi = torch.amin(x), torch.amax(x)
+x = (x - low) / (hi - low) * 255.0
+x = x.permute(1, 2, 0)
+x = x.numpy()
+x = np.clip(x, 0, 255).astype('uint8')
 
-test_tqdm = tqdm(train_data, leave=True)
-for x_test, y_test in test_tqdm:
-    with torch.no_grad():
-        p = model(x_test)
-        Q += loss_function(p, y_test).item()
-        count += 1
+image = Image.fromarray(x, 'RGB')
+image.save("result.jpg")
 
-Q /= count
-print(Q)
+plt.imshow(x)
+plt.show()
