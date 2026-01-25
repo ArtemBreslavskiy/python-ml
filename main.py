@@ -1,114 +1,104 @@
+import os
+import json
 from PIL import Image
-import numpy as np
-import matplotlib.pyplot as plt
 
 import torch
+import torch.utils.data as data
 from torchvision import models
 import torchvision.transforms.v2 as tfs_v2
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import tqdm
 
 
-class ModelStyle(nn.Module):
-    def __init__(self):
-        super().__init__()
-        _model = models.vgg19(weights=models.VGG19_Weights.DEFAULT)
-        self.mf = _model.features
-        self.mf.requires_grad_(False)
-        self.requires_grad_(False)
-        self.mf.eval()
-        self.idx_out = (0, 5, 10, 19, 28, 34)
-        self.num_style_layers = len(self.idx_out) - 1
+class DogDataset(data.Dataset):
+    def __init__(self, path, train=True, transform=None):
+        self.path = os.path.join(path, "train" if train else "test")
+        self.transform = transform
 
-    def forward(self, x):
-        outputs = []
-        for indx, layer in enumerate(self.mf):
-            x = layer(x)
-            if indx in self.idx_out:
-                outputs.append(x.squeeze(0))
+        with open(os.path.join(self.path, "format.json"), "r") as fp:
+            self.format = json.load(fp)
 
-        return outputs
+        self.length = 0
+        self.files = []
+        self.targets = torch.eye(10)
 
+        for _dir, _target in self.format.items():
+            path = os.path.join(self.path, _dir)
+            list_files = os.listdir(path)
+            self.length += len(list_files)
+            self.files.extend(map(lambda _x: (os.path.join(path, _x), _target), list_files))
 
-def get_content_loss(base_content, target):
-    return torch.mean(torch.squeeze(base_content - target))
+    def __getitem__(self, item):
+        path_file, target = self.files[item]
+        t = self.targets[target]
+        img = Image.open(path_file).convert('RGB')
 
+        if self.transform:
+            img = self.transform(img)
 
-def gram_matrix(x):
-    channels = x.size(dim=0)
-    g = x.view(channels, -1)
-    gram = torch.mm(g, g.mT) / g.size(dim=1)
-    return gram
+        return img, t
 
-
-def get_style_loss(base_style, gram_target):
-    style_weights = [1.0, 0.8, 0.5, 0.3, 0.1]
-
-    _loss = 0
-    i = 0
-    for base, target in zip(base_style, gram_target):
-        gram_style = gram_matrix(base)
-        _loss += style_weights[i] * torch.mean(torch.square(gram_style - target))
-        i += 1
-
-    return _loss
+    def __len__(self):
+        return self.length
 
 
-img = Image.open('img_3.jpg').convert('RGB')
-img_style = Image.open('img_style_2.jpg').convert('RGB')
+resnet_weights = models.ResNet50_Weights.DEFAULT
+transforms = resnet_weights.transforms()
 
-transforms = tfs_v2.Compose([tfs_v2.ToImage(),
-                             tfs_v2.ToDtype(torch.float32, scale=True)
-                             ])
+model = models.resnet50(weights=resnet_weights)
+model.requires_grad_(False)
+model.fc = nn.Linear(512*4, 10)
+model.fc.requires_grad_(True)
 
-img = transforms(img).unsqueeze(0)
-img_style = transforms(img_style).unsqueeze(0)
-img_create = img.clone()
-img_create.requires_grad_(True)
+d_train = DogDataset(r"dataset_dogs", transform=transforms)
+train_data = data.DataLoader(d_train, batch_size=32, shuffle=True)
 
-model = ModelStyle()
+optimizer = optim.Adam(params=model.fc.parameters(), lr=0.01, weight_decay=0.001)
+loss_function = nn.CrossEntropyLoss()
+epoch = 3
+model.train()
 
-outputs_img = model(img)
-outputs_img_style = model(img_style)
+for _e in range(epoch):
+    loss_mean = 0
+    lm_count = 0
 
-gram_matrix_style = [gram_matrix(x) for x in outputs_img_style[:model.num_style_layers]]
+    train_tqdm = tqdm(train_data, leave=True)
+    for x_train, y_train in train_tqdm:
+        predict = model(x_train)
+        loss = loss_function(predict, y_train)
 
-content_weight = 1
-style_weight = 1000
-best_loss = -1
-epochs = 100
-best_img = img_create.clone()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-optimizer = optim.Adam(params=[img_create], lr=0.01)
+        lm_count += 1
+        loss_mean = 1/lm_count * loss.item() + (1 - 1/lm_count) * loss_mean
+        train_tqdm.set_description(f"Epoch [{_e + 1}/{epoch}], loss_mean={loss_mean:.3f}")
 
-for _e in range(epochs):
-    outputs_img_create = model(img_create)
 
-    loss_content = get_content_loss(outputs_img_create[-1], outputs_img[-1])
-    loss_style = get_style_loss(outputs_img_create, gram_matrix_style)
-    loss = content_weight * loss_content + style_weight * loss_style
+st = model.state_dict()
+torch.save(st, 'model_transfer_resnet.tar')
 
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
+d_test = DogDataset(r"dataset_dogs", train=False, transform=transforms)
+test_data = data.DataLoader(d_test, batch_size=50, shuffle=False)
 
-    img_create.data.clamp_(0, 1)
+Q = 0
+P = 0
+count = 0
+model.eval()
 
-    if loss < best_loss or best_loss < 0:
-        best_loss = loss
-        best_img = img_create.clone()
+test_tqdm = tqdm(test_data, leave=True)
+for x_test, y_test in test_tqdm:
+    with torch.no_grad():
+        p = model(x_test)
+        p2 = torch.argmax(p, dim=1)
+        y = torch.argmax(y_test, dim=1)
+        P += torch.sum(p2 == y).item()
+        Q += loss_function(p, y_test).item()
+        count += 1
 
-    print(f'Iteration: {_e}/{epochs}, loss: {loss.item():.4f}')
-
-x = best_img.detach().squeeze()
-low, hi = torch.amin(x), torch.amax(x)
-x = (x - low) / (hi - low) * 255.0
-x = x.permute(1, 2, 0)
-x = x.numpy()
-x = np.clip(x, 0, 255).astype('uint8')
-
-image = Image.fromarray(x, 'RGB')
-image.save("result.jpg")
-
-plt.imshow(x)
-plt.show()
+Q /= count
+P /= len(d_test)
+print(Q)
+print(P)
